@@ -12,8 +12,9 @@ var RealStdout = os.Stdout
 type Dict map[string]interface{}
 type Result interface{}
 type TaskFunc func(*Task) (Result, error)
+type TaskMap map[string]TaskFunc
 
-func Execute(taskfunc TaskFunc) {
+func Main(tasks TaskMap) {
 	// load task definition from env
 	// load cluster definition from env
 	// connect upstream
@@ -27,7 +28,19 @@ func Execute(taskfunc TaskFunc) {
 		log.Fatal("err unpacking taskdef:", err)
 	}
 
+	// connect upstream as soon as possible.
+	// any error that occurs before the upstream connection
+	// is established is effectively lost.
+	client := Connect(taskdef.Upstream)
+
+	// find task function by name
+	taskfunc, exists := tasks[taskdef.Name]
+	if !exists {
+		log.Fatal("No such task:", taskdef.Name)
+	}
+
 	// set as virtual for now
+	// this avoids task lost errors while in test mode
 	taskdef.Meta["virtual"] = true
 
 	// initialize task object
@@ -36,11 +49,7 @@ func Execute(taskfunc TaskFunc) {
 		Taskdef: taskdef,
 	}
 
-	// connect upstream and send init message
-	client := Connect(taskdef.Upstream)
-	client.SendInit(taskdef)
-
-	// stdout -> log pump
+	// capture stdout and send logs upstream
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 	go func() {
@@ -52,13 +61,16 @@ func Execute(taskfunc TaskFunc) {
 		}
 	}()
 
-	// execute task code
+	// send task initialization message
+	client.SendInit(taskdef)
+
+	// execute task function
 	result, err := taskfunc(&task)
 
-	// re-attach stdout
+	// restore stdout
 	os.Stdout = RealStdout
 
-	// send return value or error
+	// send return value or error upstream
 	if err != nil {
 		client.SendError(taskdef.ID, err.Error())
 	} else {
